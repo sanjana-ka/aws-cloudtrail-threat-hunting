@@ -13,15 +13,19 @@ Investigation of anomalous IAM activity in the Splunk BOTS v3 dataset, using `aw
 ```spl
 index=botsv3 | stats count by sourcetype | sort -count
 ```
+![Sourcetype breakdown](screenshots/01_sourcetype_breakdown.png)
+
 107 sourcetypes total, spanning network capture (`stream:*`), AWS/cloud (`aws:cloudtrail`, `aws:cloudwatchlogs*`), and endpoint telemetry (`osquery:*`, `wineventlog:*`). Confirms this is an AWS-centric attack scenario with supporting endpoint and network data.
 
 ### 2. Baseline normal API activity
 ```spl
 index=botsv3 sourcetype=aws:cloudtrail | stats count by eventName | sort -count | head 20
 ```
+![EventName breakdown](screenshots/02_eventname_breakdown.png)
+
 Top calls were mostly AWS Config/Inspector housekeeping (`DescribeConfigRuleEvaluationStatus`, `ListAssessmentRuns`) and read-only describes. Two calls stood out for follow-up: `AssumeRole` (332) and `GetCallerIdentity` (304) — both common in privilege-escalation / access-verification patterns.
 
-### 3. Check `AssumeRole` for human activity
+### 3. Check AssumeRole for human activity
 ```spl
 index=botsv3 sourcetype=aws:cloudtrail eventName=AssumeRole
 | spath
@@ -30,16 +34,18 @@ index=botsv3 sourcetype=aws:cloudtrail eventName=AssumeRole
 ```
 **Result:** all 8 actors were AWS services assuming their own built-in service roles (Config, AutoScaling, VPC Flow Logs, EC2, Lambda, EventBridge, GuardDuty, Inspector). No human/attacker signal here — ruled out as noise.
 
-### 4. Check `GetCallerIdentity` — who's checking their own access?
+### 4. Check GetCallerIdentity — who's checking their own access?
 ```spl
 index=botsv3 sourcetype=aws:cloudtrail eventName=GetCallerIdentity
 | spath
 | eval actor=coalesce('userIdentity.arn','userIdentity.userName','userIdentity.type')
 | stats count by actor, sourceIPAddress | sort -count
 ```
+![GetCallerIdentity by actor and IP](screenshots/03_getcalleridentity_pivot.png)
+
 **Result:** IAM user `web_admin` called this from **two different source IPs** — `139.198.18.205` and `35.153.154.221`. One IAM identity, multiple source IPs is a strong anomaly signal.
 
-### 5. Pivot on `web_admin` — what did each IP actually do?
+### 5. Pivot on web_admin — what did each IP actually do?
 ```spl
 index=botsv3 sourcetype=aws:cloudtrail
 | spath
@@ -47,6 +53,8 @@ index=botsv3 sourcetype=aws:cloudtrail
 | search actor="*web_admin*"
 | stats count by eventName, sourceIPAddress | sort sourceIPAddress
 ```
+![web_admin activity across 4 source IPs](screenshots/04_webadmin_multi_ip.png)
+
 **Result:** `web_admin` was active from **4 distinct IPs**, each with a different behavior pattern:
 
 | Source IP | Behavior |
@@ -61,12 +69,16 @@ index=botsv3 sourcetype=aws:cloudtrail
 index=botsv3 sourcetype=aws:cloudtrail eventName=RunInstances sourceIPAddress=139.198.18.205
 | spath | table _time, requestParameters.instanceType, responseElements.instancesSet.items{}.instanceId
 ```
+![RunInstances instance types launched](screenshots/05_runinstances_types.png)
+
 Instances launched across nearly every instance family within a single minute (`m4.2xlarge`, `t2.2xlarge`, `m3.2xlarge`, `m5.2xlarge`, `x1e.16xlarge`, `c4.2xlarge`, `m5.24xlarge`, `h1.4xlarge`, `c5.9xlarge`, `c3.4xlarge`) — consistent with an attacker probing instance-type/service-limit availability rather than a normal application workload.
 
 ### 7. Confirm the persistence attempt
 ```spl
 index=botsv3 sourcetype=aws:cloudtrail eventName=CreateUser sourceIPAddress=35.153.154.221 | head 1
 ```
+![CreateUser AccessDenied event](screenshots/06_createuser_accessdenied.png)
+
 ```json
 errorCode: AccessDenied
 errorMessage: User: arn:aws:iam::622676721278:user/web_admin is not authorized to
