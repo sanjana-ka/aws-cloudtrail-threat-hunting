@@ -1,0 +1,55 @@
+# AWS CloudTrail Threat Hunting — SPL Queries
+# Splunk BOTS v3 dataset (index=botsv3)
+# Each section corresponds to a step in the investigation methodology (see README.md)
+
+# ============================================================
+# 1. Orient — what's in the environment?
+# ============================================================
+index=botsv3 | stats count by sourcetype | sort -count
+
+
+# ============================================================
+# 2. Baseline normal API activity
+# ============================================================
+index=botsv3 sourcetype=aws:cloudtrail | stats count by eventName | sort -count | head 20
+
+
+# ============================================================
+# 3. Check AssumeRole for human activity
+# ============================================================
+index=botsv3 sourcetype=aws:cloudtrail eventName=AssumeRole
+| spath
+| eval actor=coalesce('userIdentity.arn', 'userIdentity.invokedBy', 'userIdentity.type')
+| stats count by actor, requestParameters.roleArn | sort -count
+
+
+# ============================================================
+# 4. Check GetCallerIdentity — who's checking their own access?
+# ============================================================
+index=botsv3 sourcetype=aws:cloudtrail eventName=GetCallerIdentity
+| spath
+| eval actor=coalesce('userIdentity.arn','userIdentity.userName','userIdentity.type')
+| stats count by actor, sourceIPAddress | sort -count
+
+
+# ============================================================
+# 5. Pivot on web_admin — what did each IP actually do?
+# ============================================================
+index=botsv3 sourcetype=aws:cloudtrail
+| spath
+| eval actor=coalesce('userIdentity.arn','userIdentity.userName')
+| search actor="*web_admin*"
+| stats count by eventName, sourceIPAddress | sort sourceIPAddress
+
+
+# ============================================================
+# 6. Confirm the EC2 launch pattern
+# ============================================================
+index=botsv3 sourcetype=aws:cloudtrail eventName=RunInstances sourceIPAddress=139.198.18.205
+| spath | table _time, requestParameters.instanceType, responseElements.instancesSet.items{}.instanceId
+
+
+# ============================================================
+# 7. Confirm the persistence attempt
+# ============================================================
+index=botsv3 sourcetype=aws:cloudtrail eventName=CreateUser sourceIPAddress=35.153.154.221 | head 1
